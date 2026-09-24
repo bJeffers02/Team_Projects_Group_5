@@ -1,0 +1,84 @@
+# ==========================================
+# Project-Specific Image Directories
+# ==========================================
+raw_images/
+processed_images/
+received_images/
+
+# Ignore image files anywhere if accidentally placed in root
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# ==========================================
+# Python Standard & Byte-compiled
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Build & Distribution outputs
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# Virtual Environments
+# ==========================================
+venv/
+.venv/
+env/
+.env/
+env.bak/
+venv.bak/
+
+# ==========================================
+# Keys, Secrets & Serial Ports / Pipes
+# ==========================================
+*.pem
+*.key
+*.pub
+/tmp/tty*
+
+# ==========================================
+# IDEs & Code Editors
+# ==========================================
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+
+# PyCharm / JetBrains
+.idea/
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# ==========================================
+# OS Generated Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
