@@ -1,35 +1,31 @@
 import struct
 import time
 
-# Magic header to filter out radio noise (4 bytes)
+
 MAGIC_HEADER = 0xDEADBEEF
 
-# Control Message Types
 TYPE_HELLO = 0x01
 TYPE_HELLO_ACK = 0x02
 TYPE_KEY_EXCHANGE = 0x03
 
-# Streaming Message Types
 TYPE_START_IMG = 0x04
 TYPE_END_IMG = 0x05
 TYPE_DATA_CHUNK = 0x06
 TYPE_ACK = 0x07
 TYPE_NACK = 0x08
 
-# Header format: Magic(4B) + MsgType(1B) + PayloadLength(2B) = 7 Bytes total
 HEADER_FORMAT = "!IBH"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
-# Key exchange chunking
-KEY_CHUNK_HEADER_FORMAT = "!HH"  # chunk_index, total_chunks
+KEY_CHUNK_HEADER_FORMAT = "!HH"
 KEY_CHUNK_HEADER_SIZE = struct.calcsize(KEY_CHUNK_HEADER_FORMAT)
 
-# Leave room for the chunk header inside MAX_PAYLOAD_SIZE
 MAX_PAYLOAD_SIZE = 64
-TIMEOUT = 2.0  # seconds to wait for ACK
+KEY_CHUNK_DATA_SIZE = MAX_PAYLOAD_SIZE - KEY_CHUNK_HEADER_SIZE
+
+TIMEOUT = 2.0
 MAX_RETRIES = 5
 
-KEY_CHUNK_DATA_SIZE = MAX_PAYLOAD_SIZE - KEY_CHUNK_HEADER_SIZE
 
 def pack_message(msg_type: int, payload: bytes = b"") -> bytes:
     """Builds a binary frame with a magic header, message type, length, and payload."""
@@ -78,130 +74,177 @@ def send_chunk(serial_conn, encrypted_payload: bytes, md5_hash: bytes) -> bool:
 
 
 def read_message(serial_conn, timeout: float = 1.0):
-    """Reads a valid protocol frame from serial, handling noise, fragmentation, and byte alignment."""
-    
+    # Keep buffer between calls so fragmented frames aren't lost.
     if not hasattr(serial_conn, "_rx_buffer"):
         serial_conn._rx_buffer = bytearray()
 
     buffer = serial_conn._rx_buffer
-    
     start_time = time.time()
-    
+    magic_bytes = struct.pack("!I", MAGIC_HEADER)
 
-    while (time.time() - start_time) < timeout:
+    while time.time() - start_time < timeout:
         if serial_conn.in_waiting > 0:
             buffer.extend(serial_conn.read(serial_conn.in_waiting))
 
-        magic_bytes = struct.pack("!I", MAGIC_HEADER)
         magic_idx = buffer.find(magic_bytes)
 
         if magic_idx == -1:
-            # Magic bytes not found; keep only the last byte in case a 2-byte magic sequence was split
             if len(buffer) > len(magic_bytes) - 1:
-                del buffer[: -(len(magic_bytes) - 1)]
+                del buffer[:-(len(magic_bytes) - 1)]
             time.sleep(0.005)
             continue
 
-        # Drop garbage noise preceding the magic sequence
         if magic_idx > 0:
             del buffer[:magic_idx]
 
-        # Ensure we have a full header
         if len(buffer) < HEADER_SIZE:
             time.sleep(0.005)
             continue
 
-        # Parse header safely
         magic, msg_type, payload_len = struct.unpack(HEADER_FORMAT, buffer[:HEADER_SIZE])
 
-        # Sanity check payload length to prevent infinite waiting on corrupted length fields
-        if payload_len > MAX_PAYLOAD_SIZE:
-            # Invalid frame length caused by noise; discard magic byte and keep scanning
-            buffer.pop(0)
+        if magic != MAGIC_HEADER or payload_len > MAX_PAYLOAD_SIZE:
+            del buffer[0]
             continue
 
-        # Wait for full frame (Header + Payload)
         total_frame_size = HEADER_SIZE + payload_len
+
         if len(buffer) < total_frame_size:
             time.sleep(0.005)
             continue
 
-        # Complete packet extracted
-        full_packet = bytes(buffer[:total_frame_size])
-        payload = full_packet[HEADER_SIZE:]
-
-        # Remove frame from buffer
+        packet = bytes(buffer[:total_frame_size])
         del buffer[:total_frame_size]
 
-        return msg_type, payload
+        return msg_type, packet[HEADER_SIZE:]
 
     return None, None
     
 
-def sender_handshake(serial_conn, tx_public_key: bytes, retry_delay: float = 1.0) -> bytes:
-    """Executes handshake on the Sender.
+def send_public_key(serial_conn, public_key: bytes):
+    total_chunks = (len(public_key) + KEY_CHUNK_DATA_SIZE - 1) // KEY_CHUNK_DATA_SIZE
 
-    Returns the receiver's Public Key on success.
-    """
+    for chunk_index in range(total_chunks):
+        start = chunk_index * KEY_CHUNK_DATA_SIZE
+        chunk_data = public_key[start:start + KEY_CHUNK_DATA_SIZE]
+
+        chunk_header = struct.pack(KEY_CHUNK_HEADER_FORMAT, chunk_index, total_chunks)
+        payload = chunk_header + chunk_data
+
+        retries = 0
+
+        while retries < MAX_RETRIES:
+            serial_conn.write(pack_message(TYPE_KEY_EXCHANGE, payload))
+            serial_conn.flush()
+
+            print(f"[TX] Sent Public Key chunk {chunk_index + 1}/{total_chunks} ({len(chunk_data)} bytes)")
+
+            msg_type, _ = read_message(serial_conn, timeout=TIMEOUT)
+
+            if msg_type == TYPE_ACK:
+                print(f"[TX] Key chunk {chunk_index + 1}/{total_chunks} ACK received")
+                break
+
+            retries += 1
+            print(f"[TX] No ACK for key chunk {chunk_index + 1}; retrying ({retries}/{MAX_RETRIES})")
+            time.sleep(0.3)
+
+        if retries >= MAX_RETRIES:
+            raise RuntimeError(f"Failed to send key chunk {chunk_index + 1}")
+
+
+def receive_public_key(serial_conn, timeout: float = 15.0):
+    key_chunks = {}
+    total_chunks = None
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        msg_type, payload = read_message(serial_conn, timeout=1.0)
+
+        if msg_type != TYPE_KEY_EXCHANGE or not payload:
+            continue
+
+        if len(payload) < KEY_CHUNK_HEADER_SIZE:
+            continue
+
+        chunk_index, received_total = struct.unpack(KEY_CHUNK_HEADER_FORMAT, payload[:KEY_CHUNK_HEADER_SIZE])
+        chunk_data = payload[KEY_CHUNK_HEADER_SIZE:]
+
+        if total_chunks is None:
+            total_chunks = received_total
+
+        key_chunks[chunk_index] = chunk_data
+
+        print(f"[RX] Received Public Key chunk {chunk_index + 1}/{received_total} ({len(chunk_data)} bytes)")
+
+        serial_conn.write(pack_message(TYPE_ACK))
+        serial_conn.flush()
+
+        if len(key_chunks) == total_chunks and all(i in key_chunks for i in range(total_chunks)):
+            public_key = b"".join(key_chunks[i] for i in range(total_chunks))
+            print(f"[RX] Reassembled Public Key: {len(public_key)} bytes")
+            return public_key
+
+    return None
+
+
+def sender_handshake(serial_conn, tx_public_key: bytes, retry_delay: float = 1.0) -> bytes:
     print("[TX] Initiating Handshake...")
 
-    # Step 1: Send HELLO until HELLO_ACK is received
-    connected = False
-    while not connected:
-        hello_pkt = pack_message(TYPE_HELLO)
-        serial_conn.write(hello_pkt)
+    while True:
+        serial_conn.write(pack_message(TYPE_HELLO))
         serial_conn.flush()
         print("[TX] Sent HELLO... waiting for ACK")
 
         msg_type, _ = read_message(serial_conn, timeout=retry_delay)
+
         if msg_type == TYPE_HELLO_ACK:
             print("[TX] Received HELLO_ACK from Receiver!")
-            connected = True
+            break
 
-    # Step 2: Key Exchange
-    rx_public_key = None
-    while rx_public_key is None:
-        key_pkt = pack_message(TYPE_KEY_EXCHANGE, tx_public_key)
-        serial_conn.write(key_pkt)
-        serial_conn.flush()
-        print("[TX] Sent Public Key... waiting for Receiver Key")
+    print(f"[TX] Sending Public Key ({len(tx_public_key)} bytes)...")
+    send_public_key(serial_conn, tx_public_key)
 
-        msg_type, payload = read_message(serial_conn, timeout=2.0)
-        if msg_type == TYPE_KEY_EXCHANGE and payload:
-            rx_public_key = payload
-            print("[TX] Received Receiver's Public Key!")
+    print("[TX] Waiting for Receiver Key...")
+    rx_public_key = receive_public_key(serial_conn, timeout=15.0)
 
+    if rx_public_key is None:
+        raise RuntimeError("[TX] Failed to receive Receiver Public Key")
+
+    print(f"[TX] Received Receiver Public Key ({len(rx_public_key)} bytes)")
     print("[TX] Handshake & Key Exchange Complete!\n")
+
     return rx_public_key
 
 
 def receiver_handshake(serial_conn, rx_public_key: bytes) -> bytes:
-    """Executes handshake on the Receiver.
-
-    Returns the sender's Public Key on success.
-    """
     print("[RX] Listening for sender Handshake...")
 
-    tx_public_key = None
-    while tx_public_key is None:
-        msg_type, payload = read_message(serial_conn, timeout=2.0)
+    # Wait for HELLO.
+    while True:
+        msg_type, _ = read_message(serial_conn, timeout=2.0)
 
-        # Handle HELLO (or duplicate HELLO if transmitter missed our ACK)
         if msg_type == TYPE_HELLO:
             print("[RX] Received HELLO! Sending HELLO_ACK...")
             serial_conn.write(pack_message(TYPE_HELLO_ACK))
             serial_conn.flush()
+            print("[RX] Sent HELLO_ACK.")
+            break
 
-        # Handle KEY_EXCHANGE
-        elif msg_type == TYPE_KEY_EXCHANGE and payload:
-            tx_public_key = payload
-            print("[RX] Received Sender's Public Key!")
+    # Receive sender key.
+    print("[RX] Waiting for Sender's Public Key...")
+    tx_public_key = receive_public_key(serial_conn, timeout=15.0)
 
-            # Send back Receiver's Public Key
-            reply_key_pkt = pack_message(TYPE_KEY_EXCHANGE, rx_public_key)
-            serial_conn.write(reply_key_pkt)
-            serial_conn.flush()
-            print("[RX] Sent Public Key to Sender.")
+    if tx_public_key is None:
+        raise RuntimeError("[RX] Failed to receive Sender Public Key")
+
+    print(f"[RX] Received Sender Public Key ({len(tx_public_key)} bytes)")
+
+    # Send receiver key.
+    print(f"[RX] Sending Receiver Public Key ({len(rx_public_key)} bytes)...")
+    send_public_key(serial_conn, rx_public_key)
 
     print("[RX] Handshake & Key Exchange Complete!\n")
+
     return tx_public_key
+    
