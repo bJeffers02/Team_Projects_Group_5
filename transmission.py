@@ -141,9 +141,12 @@ def send_public_key(serial_conn, public_key: bytes):
 
             msg_type, _ = read_message(serial_conn, timeout=TIMEOUT)
 
-            if msg_type == TYPE_ACK:
-                print(f"[TX] Key chunk {chunk_index + 1}/{total_chunks} ACK received")
-                break
+            if msg_type == TYPE_ACK and payload and len(payload) == 2:
+                ack_index = struct.unpack("!H", payload)[0]
+
+                if ack_index == chunk_index:
+                    print(f"[TX] Key chunk {chunk_index + 1}/{total_chunks} ACK received")
+                    break
 
             retries += 1
             print(f"[TX] No ACK for key chunk {chunk_index + 1}; retrying ({retries}/{MAX_RETRIES})")
@@ -177,7 +180,7 @@ def receive_public_key(serial_conn, timeout: float = 15.0):
 
         print(f"[RX] Received Public Key chunk {chunk_index + 1}/{received_total} ({len(chunk_data)} bytes)")
 
-        serial_conn.write(pack_message(TYPE_ACK))
+        serial_conn.write(pack_message(TYPE_ACK, struct.pack("!H", chunk_index)))
         serial_conn.flush()
 
         if len(key_chunks) == total_chunks and all(i in key_chunks for i in range(total_chunks)):
