@@ -1,5 +1,6 @@
 import struct
 import time
+import re
 
 
 MAGIC_HEADER = 0xDEADBEEF
@@ -186,6 +187,7 @@ def receive_public_key(serial_conn, timeout: float = 15.0):
 
         if len(key_chunks) == total_chunks and all(i in key_chunks for i in range(total_chunks)):
             public_key = b"".join(key_chunks[i] for i in range(total_chunks))
+            public_key = re.sub(rb"#RECV:\s*", b"", public_key)
             print(f"[RX] Reassembled Public Key: {len(public_key)} bytes")
             return public_key
 
