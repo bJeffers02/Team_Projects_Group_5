@@ -79,8 +79,14 @@ def send_chunk(serial_conn, encrypted_payload: bytes, md5_hash: bytes) -> bool:
 
 def read_message(serial_conn, timeout: float = 1.0):
     """Reads a valid protocol frame from serial, handling noise, fragmentation, and byte alignment."""
+    
+    if not hasattr(serial_conn, "_rx_buffer"):
+        serial_conn._rx_buffer = bytearray()
+
+    buffer = serial_conn._rx_buffer
+    
     start_time = time.time()
-    buffer = bytearray()
+    
 
     while (time.time() - start_time) < timeout:
         if serial_conn.in_waiting > 0:
