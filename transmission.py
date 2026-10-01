@@ -139,10 +139,12 @@ def send_public_key(serial_conn, public_key: bytes):
 
             print(f"[TX] Sent Public Key chunk {chunk_index + 1}/{total_chunks} ({len(chunk_data)} bytes)")
 
-            msg_type, _ = read_message(serial_conn, timeout=TIMEOUT)
+            msg_type, payload = read_message(serial_conn, timeout=TIMEOUT)
 
-            if msg_type == TYPE_ACK and payload and len(payload) == 2:
+            if msg_type == TYPE_ACK and len(payload) == 2:
                 ack_index = struct.unpack("!H", payload)[0]
+
+                print(f"[TX] Received ACK for chunk {ack_index + 1}")
 
                 if ack_index == chunk_index:
                     print(f"[TX] Key chunk {chunk_index + 1}/{total_chunks} ACK received")
@@ -180,8 +182,11 @@ def receive_public_key(serial_conn, timeout: float = 15.0):
 
         print(f"[RX] Received Public Key chunk {chunk_index + 1}/{received_total} ({len(chunk_data)} bytes)")
 
-        serial_conn.write(pack_message(TYPE_ACK, struct.pack("!H", chunk_index)))
+        ack = struct.pack("!H", chunk_index)
+        serial_conn.write(pack_message(TYPE_ACK, ack))
         serial_conn.flush()
+
+        print(f"[RX] Sent ACK for chunk {chunk_index + 1}/{received_total}")
 
         if len(key_chunks) == total_chunks and all(i in key_chunks for i in range(total_chunks)):
             public_key = b"".join(key_chunks[i] for i in range(total_chunks))
