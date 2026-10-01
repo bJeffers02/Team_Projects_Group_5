@@ -75,7 +75,6 @@ def send_chunk(serial_conn, encrypted_payload: bytes, md5_hash: bytes) -> bool:
 
 
 def read_message(serial_conn, timeout: float = 1.0):
-    # Keep buffer between calls so fragmented frames aren't lost.
     if not hasattr(serial_conn, "_rx_buffer"):
         serial_conn._rx_buffer = bytearray()
 
@@ -84,45 +83,61 @@ def read_message(serial_conn, timeout: float = 1.0):
     magic_bytes = struct.pack("!I", MAGIC_HEADER)
 
     while time.time() - start_time < timeout:
+
         if serial_conn.in_waiting > 0:
-            buffer.extend(serial_conn.read(serial_conn.in_waiting))
+            data = serial_conn.read(serial_conn.in_waiting)
+            print(f"RAW RX: {data!r}")
+            buffer.extend(data)
 
-        # Remove antenna metadata before parsing the protocol frame.
-        buffer[:] = re.sub(rb"#RECV:\s*", b"", buffer)
-
+        # Find the beginning of our binary protocol frame.
         magic_idx = buffer.find(magic_bytes)
 
         if magic_idx == -1:
-            if len(buffer) > len(magic_bytes) - 1:
-                del buffer[:-(len(magic_bytes) - 1)]
+            # We haven't received MAGIC_HEADER yet.
+            # Keep everything because the next read may complete it.
             time.sleep(0.005)
             continue
 
+        # Remove antenna text/prefix before our protocol frame.
         if magic_idx > 0:
             del buffer[:magic_idx]
 
+        # Wait for complete protocol header.
         if len(buffer) < HEADER_SIZE:
             time.sleep(0.005)
             continue
 
-        magic, msg_type, payload_len = struct.unpack(HEADER_FORMAT, buffer[:HEADER_SIZE])
+        magic, msg_type, payload_len = struct.unpack(
+            HEADER_FORMAT,
+            buffer[:HEADER_SIZE]
+        )
 
-        if magic != MAGIC_HEADER or payload_len > MAX_PAYLOAD_SIZE:
+        if magic != MAGIC_HEADER:
+            del buffer[0]
+            continue
+
+        if payload_len > MAX_PAYLOAD_SIZE:
+            print(f"[RX] Invalid payload length: {payload_len}")
             del buffer[0]
             continue
 
         total_frame_size = HEADER_SIZE + payload_len
 
+        # Wait for entire payload.
         if len(buffer) < total_frame_size:
             time.sleep(0.005)
             continue
 
+        # Extract exactly one protocol frame.
         packet = bytes(buffer[:total_frame_size])
+
+        # Remove exactly that frame from the persistent buffer.
         del buffer[:total_frame_size]
 
         return msg_type, packet[HEADER_SIZE:]
 
     return None, None
+
     
 
 def send_public_key(serial_conn, public_key: bytes):
