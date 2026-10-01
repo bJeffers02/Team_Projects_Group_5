@@ -20,10 +20,16 @@ TYPE_NACK = 0x08
 HEADER_FORMAT = "!IBH"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
+# Key exchange chunking
+KEY_CHUNK_HEADER_FORMAT = "!HH"  # chunk_index, total_chunks
+KEY_CHUNK_HEADER_SIZE = struct.calcsize(KEY_CHUNK_HEADER_FORMAT)
 
+# Leave room for the chunk header inside MAX_PAYLOAD_SIZE
+MAX_PAYLOAD_SIZE = 64
 TIMEOUT = 2.0  # seconds to wait for ACK
 MAX_RETRIES = 5
 
+KEY_CHUNK_DATA_SIZE = MAX_PAYLOAD_SIZE - KEY_CHUNK_HEADER_SIZE
 
 def pack_message(msg_type: int, payload: bytes = b"") -> bytes:
     """Builds a binary frame with a magic header, message type, length, and payload."""
@@ -72,38 +78,59 @@ def send_chunk(serial_conn, encrypted_payload: bytes, md5_hash: bytes) -> bool:
 
 
 def read_message(serial_conn, timeout: float = 1.0):
-    """Reads a valid protocol frame from serial, handling noise and byte alignment."""
+    """Reads a valid protocol frame from serial, handling noise, fragmentation, and byte alignment."""
     start_time = time.time()
+    buffer = bytearray()
 
     while (time.time() - start_time) < timeout:
-        if serial_conn.in_waiting < HEADER_SIZE:
-            time.sleep(0.01)
+        if serial_conn.in_waiting > 0:
+            buffer.extend(serial_conn.read(serial_conn.in_waiting))
+
+        magic_bytes = struct.pack("!I", MAGIC_HEADER)
+        magic_idx = buffer.find(magic_bytes)
+
+        if magic_idx == -1:
+            # Magic bytes not found; keep only the last byte in case a 2-byte magic sequence was split
+            if len(buffer) > len(magic_bytes) - 1:
+                del buffer[: -(len(magic_bytes) - 1)]
+            time.sleep(0.005)
             continue
 
-        # Peek or read potential header
-        header_bytes = serial_conn.read(HEADER_SIZE)
-        try:
-            magic, msg_type, payload_len = struct.unpack(
-                HEADER_FORMAT, header_bytes
-            )
-        except struct.error:
+        # Drop garbage noise preceding the magic sequence
+        if magic_idx > 0:
+            del buffer[:magic_idx]
+
+        # Ensure we have a full header
+        if len(buffer) < HEADER_SIZE:
+            time.sleep(0.005)
             continue
 
-        # Sync check: ensure packet starts with our magic header
-        if magic != MAGIC_HEADER:
-            # Drop 1 byte and re-align if out of sync
-            serial_conn.read(1)
+        # Parse header safely
+        magic, msg_type, payload_len = struct.unpack(HEADER_FORMAT, buffer[:HEADER_SIZE])
+
+        # Sanity check payload length to prevent infinite waiting on corrupted length fields
+        if payload_len > MAX_PAYLOAD_SIZE:
+            # Invalid frame length caused by noise; discard magic byte and keep scanning
+            buffer.pop(0)
             continue
 
-        # Read remaining payload
-        payload = b""
-        if payload_len > 0:
-            payload = serial_conn.read(payload_len)
+        # Wait for full frame (Header + Payload)
+        total_frame_size = HEADER_SIZE + payload_len
+        if len(buffer) < total_frame_size:
+            time.sleep(0.005)
+            continue
+
+        # Complete packet extracted
+        full_packet = bytes(buffer[:total_frame_size])
+        payload = full_packet[HEADER_SIZE:]
+
+        # Remove frame from buffer
+        del buffer[:total_frame_size]
 
         return msg_type, payload
 
-    return None, None  # Timeout occurred
-
+    return None, None
+    
 
 def sender_handshake(serial_conn, tx_public_key: bytes, retry_delay: float = 1.0) -> bytes:
     """Executes handshake on the Sender.

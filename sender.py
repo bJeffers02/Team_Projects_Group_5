@@ -12,7 +12,7 @@ from transmission import (
 import crypt
 
 # --- Configuration ---
-SERIAL_PORT = '/tmp/ttyV1'  # Target port ('/dev/ttyUSBx' or 'COMx')
+SERIAL_PORT = '/dev/ttyUSB0'  # Target port ('/dev/ttyUSBx' or 'COMx')
 BAUD_RATE = 9600
 
 IMAGES_PATH = 'raw_images/'

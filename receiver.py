@@ -14,7 +14,7 @@ from transmission import (
 import crypt
 
 # --- Configuration ---
-SERIAL_PORT = '/tmp/ttyV0' 
+SERIAL_PORT = '/dev/ttyUSB0' 
 BAUD_RATE = 9600
 OUTPUT_DIR = 'received_images/'
 MD5_LEN = 32
